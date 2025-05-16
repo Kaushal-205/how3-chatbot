@@ -6,6 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
+    "backend": "cd backend && bun start",
+    "dev:all": "bun run backend & bun run dev",
     "lint": "next lint"
   },
   "resolutions": {
@@ -47,10 +49,8 @@
     "@raydium-io/raydium-sdk-v2": "^0.1.133-alpha",
     "@solana/spl-token": "^0.4.13",
     "@solana/wallet-adapter-base": "^0.9.23",
-    "@solana/wallet-adapter-phantom": "^0.9.24",
     "@solana/wallet-adapter-react": "^0.15.35",
     "@solana/wallet-adapter-react-ui": "^0.9.34",
-    "@solana/wallet-adapter-solflare": "^0.6.28",
     "@solana/web3.js": "^1.98.2",
     "@solendprotocol/solend-sdk": "^0.14.22",
     "@types/bn.js": "^5.1.6",

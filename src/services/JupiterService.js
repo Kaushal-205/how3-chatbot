@@ -47,6 +47,48 @@ class RaydiumService {
                 decimals: 6,
                 symbol: 'TRUMP',    
                 name: 'Trump'
+            },
+            'JUP': {
+                address: 'JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN',
+                decimals: 6,
+                symbol: 'JUP',
+                name: 'Jupiter'
+            },
+            'WIF': {
+                address: 'EKpQGSJtjMFqKZ9KQanSqYXRcF8fHVF28pd1rPBjay7X',
+                decimals: 6,
+                symbol: 'WIF',
+                name: 'Dogwifhat'
+            },
+            'BOME': {
+                address: 'Gz7VkD4MacbEB6yC5XD3HcumEiYx2EtDYYrMnKNx7JG',
+                decimals: 6,
+                symbol: 'BOME',
+                name: 'Book of Meme'
+            },
+            'MSOL': {
+                address: 'mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So',
+                decimals: 9,
+                symbol: 'MSOL',
+                name: 'Marinade staked SOL'
+            },
+            'WBTC': {
+                address: '9n4nbM75f5Ui33ZbPYXn59EwSgE8CGsHtAeTH5YFeJ9E',
+                decimals: 6,
+                symbol: 'WBTC',
+                name: 'Wrapped Bitcoin (Sollet)'
+            },
+            'WETH': {
+                address: '7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs',
+                decimals: 8,
+                symbol: 'WETH',
+                name: 'Wrapped Ethereum (Sollet)'
+            },
+            'PEPE': {
+                address: 'FDqp7ioPenKRzQqseFv84kxDMUT83CX1qZxgDTQDkwT2',
+                decimals: 6,
+                symbol: 'PEPE',
+                name: 'Pepe'
             }
         };
     }

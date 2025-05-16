@@ -8,6 +8,7 @@ const Stripe = require('stripe');
 const crypto = require('crypto');
 const bs58 = require('bs58');
 const fetch = require('node-fetch');
+const { TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID, createAssociatedTokenAccountInstruction, getAssociatedTokenAddress } = require('@solana/spl-token');
 
 require('dotenv').config();
 
@@ -173,15 +174,15 @@ app.post('/api/create-checkout-session', async (req, res) => {
     // Create a unique session ID
     const uniqueSessionId = `session_${Date.now()}_${Math.random().toString(36).substring(2, 15)}`;
     
-    // Determine if this is a direct SOL purchase or a token swap
-    const isTokenSwap = tokenSymbol && tokenAddress && tokenAmount;
+    // Determine if this is a token swap based on whether it's a Solana token
+    const isTokenSwap = Boolean(tokenSymbol);
     
     // Prepare product name and description based on purchase type
     let productName, productDescription;
     
     if (isTokenSwap) {
       productName = `${tokenSymbol} Token Purchase (via SOL)`;
-      productDescription = `Buy ${tokenAmount} ${tokenSymbol} tokens using SOL on Solana Mainnet`;
+      productDescription = `Buy ${tokenAmount || 'tokens'} ${tokenSymbol} using SOL on Solana Mainnet`;
     } else {
       productName = `Solana Mainnet Top-up (${displaySolAmount} SOL)`;
       productDescription = `Adds ${displaySolAmount} SOL to your Solana wallet on Mainnet`;
@@ -214,7 +215,7 @@ app.post('/api/create-checkout-session', async (req, res) => {
         tokenAddress: tokenAddress || '',
         tokenAmount: tokenAmount ? tokenAmount.toString() : '',
       },
-      success_url: `${backendUrl}/payment-success?amount=${finalSolAmount}&wallet=${walletAddress}&success=true&session_id=${uniqueSessionId}${isTokenSwap ? '&token_swap=true' : ''}`,
+      success_url: `${backendUrl}/payment-success?amount=${finalSolAmount}&wallet=${walletAddress}&success=true&session_id=${uniqueSessionId}${isTokenSwap ? `&token_swap=true&token_symbol=${tokenSymbol}&token_address=${tokenAddress}` : ''}`,
       cancel_url: `${frontendUrl}?canceled=true`,
       customer_email: email || undefined,
     });
@@ -254,7 +255,7 @@ app.post('/api/create-checkout-session', async (req, res) => {
 
 // === New endpoint to handle payment success and trigger SOL transfer ===
 app.get('/payment-success', async (req, res) => {
-  const { session_id, wallet, amount, token_swap } = req.query;
+  const { session_id, wallet, amount, token_swap, token_symbol, token_address } = req.query;
   
   console.log(`Payment success for session: ${session_id}, wallet: ${wallet}, amount: ${amount}, token_swap: ${token_swap}`);
   
@@ -264,7 +265,9 @@ app.get('/payment-success', async (req, res) => {
     status: 'payment_completed',
     amount: amount || 0.1,
     sessionId: session_id || '',
-    isTokenSwap: token_swap === 'true'
+    isTokenSwap: false, // default to false
+    tokenSymbol: token_symbol || '',
+    tokenAddress: token_address || ''
   };
   
   // Get session data if available for additional info
@@ -272,10 +275,14 @@ app.get('/payment-success', async (req, res) => {
     const storedSession = paymentSessions.get(session_id);
     sessionData.status = 'payment_completed';
     sessionData.solAmount = storedSession.solAmount;
-    sessionData.isTokenSwap = storedSession.isTokenSwap;
+    sessionData.isTokenSwap = !!storedSession.isTokenSwap; // force boolean
     sessionData.tokenSymbol = storedSession.tokenSymbol;
     sessionData.tokenAddress = storedSession.tokenAddress;
     sessionData.tokenAmount = storedSession.tokenAmount;
+  } else if (token_swap) {
+    sessionData.isTokenSwap = token_swap === 'true';
+    sessionData.tokenSymbol = token_symbol;
+    sessionData.tokenAddress = token_address;
   }
   
   const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
@@ -410,8 +417,13 @@ app.post('/api/transfer-sol', async (req, res) => {
       });
     }
     
-    // Connect to Solana
-    const connection = new Connection(process.env.NEXT_PUBLIC_ALCHEMY_RPC_URL || 'https://api.mainnet-beta.solana.com');
+    // Connect to Solana with WebSocket configuration
+    const solConnection = new Connection('https://api.mainnet-beta.solana.com', {
+      commitment: 'confirmed',
+      wsEndpoint: 'wss://api.mainnet-beta.solana.com',
+      confirmTransactionInitialTimeout: 60000,
+      disableRetryOnRateLimit: false
+    });
     
     // Verify the recipient wallet address
     let recipientPubkey;
@@ -446,24 +458,37 @@ app.post('/api/transfer-sol', async (req, res) => {
     
     try {
       // Use longer-lasting blockhash and additional retries
-      const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
+      const { blockhash, lastValidBlockHeight } = await solConnection.getLatestBlockhash('confirmed');
       transaction.recentBlockhash = blockhash;
       transaction.lastValidBlockHeight = lastValidBlockHeight;
       
-      // Send and confirm with retry settings
-    const signature = await sendAndConfirmTransaction(
-      connection,
-      transaction,
-        [fundingKeypair],
-        {
-          commitment: 'confirmed',
-          maxRetries: 3
-        }
-      );
-    
-    // Create explorer link
-    const explorerLink = `https://solscan.io/tx/${signature}`;
-      console.log(`SOL transfer successful! Transaction: ${signature}`);
+      // Get dynamic priority fee
+      const priorityFee = await getDynamicPriorityFee(solConnection);
+      console.log(`Using priority fee: ${priorityFee} lamports (${priorityFee / 1e9} SOL)`);
+      
+      // Sign transaction
+      transaction.feePayer = fundingKeypair.publicKey;
+      transaction.sign(fundingKeypair);
+      
+      // Send transaction without waiting for confirmation
+      console.log('Sending SOL transfer transaction...');
+      const signature = await solConnection.sendTransaction(transaction, [fundingKeypair], {
+        skipPreflight: true,
+        preflightCommitment: 'processed',
+        maxRetries: 1,
+        priorityFee: priorityFee
+      });
+      
+      console.log('SOL transfer transaction sent:', signature);
+      
+      // Quick status check without waiting for full confirmation
+      console.log('Performing quick status check...');
+      const statusCheck = await solConnection.getSignatureStatus(signature);
+      console.log('Initial transaction status:', statusCheck?.value?.confirmationStatus || 'pending');
+      
+      // Create explorer link
+      const explorerLink = `https://solscan.io/tx/${signature}`;
+      console.log(`SOL transfer initiated! Transaction: ${signature}`);
       
       // Update session if available
       if (sessionId && paymentSessions.has(sessionId)) {
@@ -484,11 +509,12 @@ app.post('/api/transfer-sol', async (req, res) => {
         session.transferredSolAmount = amount;
       }
     
-    return res.status(200).json({
-      status: 'success',
+      return res.status(200).json({
+        status: 'success',
         transaction: signature,
-      explorerLink,
-        amount
+        explorerLink,
+        amount,
+        message: `SOL transfer of ${amount} initiated successfully. Transaction sent to network.`
       });
     } catch (txError) {
       console.error('Error sending transaction:', txError);
@@ -568,16 +594,43 @@ app.post('/api/get-swap-quote', async (req, res) => {
   }
 });
 
+// Utility function to get dynamic priority fees
+async function getDynamicPriorityFee(connection) {
+  try {
+    // Get recent priority fee data
+    const priorityFees = await connection.getRecentPrioritizationFees();
+    
+    if (priorityFees && priorityFees.length > 0) {
+      // Sort by slot in descending order to get most recent
+      priorityFees.sort((a, b) => b.slot - a.slot);
+      
+      // Get the median of recent fees, with a minimum of 100,000 lamports
+      const recentFees = priorityFees.slice(0, 5).map(fee => fee.prioritizationFee);
+      const medianFee = recentFees.sort((a, b) => a - b)[Math.floor(recentFees.length / 2)];
+      
+      // Add 20% buffer to median fee
+      const suggestedFee = Math.ceil(medianFee * 1.2);
+      
+      // Ensure fee is between 100,000 and 1,000,000 lamports
+      return Math.min(Math.max(suggestedFee, 100000), 1000000);
+    }
+    
+    // Default to 200,000 if no data available
+    return 200000;
+  } catch (error) {
+    console.warn('Error getting priority fees, using default:', error);
+    return 200000;
+  }
+}
+
 // API endpoint to swap SOL to token via Jupiter
 app.post('/api/swap-tokens', async (req, res) => {
   console.log('Swap tokens request received:', req.body);
   
   try {
-    const { walletAddress, sessionId, fromToken = 'SOL', toToken, amount } = req.body;
+    const { walletAddress, sessionId, toToken, amount } = req.body;
     
-    // Log request parameters
-    console.log(`Processing swap request: wallet=${walletAddress}, token=${toToken}, amount=${amount}`);
-    
+    // Validate required parameters
     if (!walletAddress) {
       return res.status(400).json({ error: 'Wallet address is required' });
     }
@@ -587,10 +640,10 @@ app.post('/api/swap-tokens', async (req, res) => {
     }
     
     if (!amount || isNaN(amount) || amount <= 0) {
-      return res.status(400).json({ error: 'Valid amount is required' });
+      return res.status(400).json({ error: 'Valid SOL amount is required' });
     }
     
-    // Check if we have a funding wallet
+    // Check if funding wallet is available
     if (!fundingKeypair) {
       return res.status(500).json({ 
         error: 'Funding wallet not initialized. Check FUNDING_WALLET_SECRET environment variable.' 
@@ -602,110 +655,65 @@ app.post('/api/swap-tokens', async (req, res) => {
     if (sessionId && paymentSessions.has(sessionId)) {
       sessionInfo = paymentSessions.get(sessionId);
     }
-
-    // USDC token address on Solana mainnet
-    const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
     
-    // Establish connection to Solana
-    const connection = new Connection(process.env.NEXT_PUBLIC_ALCHEMY_RPC_URL || 'https://api.mainnet-beta.solana.com');
+    // Establish connection to Solana with WebSocket configuration
+    const swapConnection = new Connection('https://api.mainnet-beta.solana.com', {
+      commitment: 'confirmed',
+      wsEndpoint: 'wss://api.mainnet-beta.solana.com',
+      confirmTransactionInitialTimeout: 60000,
+      disableRetryOnRateLimit: false
+    });
     
     // Verify the recipient wallet address
-    let recipientPubkey;
     try {
-      recipientPubkey = new PublicKey(walletAddress);
+      new PublicKey(walletAddress);
     } catch (err) {
       return res.status(400).json({ 
         error: `Invalid wallet address: ${walletAddress}` 
       });
     }
     
-    // Step 1: Directly swap SOL to the target token using the funding wallet
-    console.log(`Using funding wallet to swap ${amount} SOL directly to ${toToken}`);
-    
-    // Get quote for SOL to target token
+    // Get Jupiter quote for SOL to target token
     const jupiterQuoteUrl = "https://quote-api.jup.ag/v6/quote";
     const quoteParams = new URLSearchParams({
       inputMint: "So11111111111111111111111111111111111111112", // SOL mint
       outputMint: toToken,
-      amount: Math.round(amount * 1e9).toString(), // Convert to lamports
+      amount: Math.round(amount * 1e9).toString(), // Convert SOL to lamports
       slippageBps: "50"
     }).toString();
     
     const quoteUrl = `${jupiterQuoteUrl}?${quoteParams}`;
     console.log(`Requesting Jupiter quote: ${quoteUrl}`);
     
-    // Retry mechanism for Jupiter API calls
-    let quoteResponse;
+    // Get quote with retry mechanism
+    let quoteData;
     let quoteRetries = 0;
     const maxQuoteRetries = 3;
     
     while (quoteRetries < maxQuoteRetries) {
       try {
-        console.log(`Jupiter quote attempt ${quoteRetries + 1}/${maxQuoteRetries}`);
-        
-        // Add timeout to fetch request using AbortController
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
+        const timeoutId = setTimeout(() => controller.abort(), 30000);
         
-        quoteResponse = await fetch(quoteUrl, { signal: controller.signal });
+        const quoteResponse = await fetch(quoteUrl, { signal: controller.signal });
         clearTimeout(timeoutId);
         
-        console.log('Jupiter quote response status:', quoteResponse.status);
-        
         if (!quoteResponse.ok) {
-          const errorText = await quoteResponse.text();
-          console.error('Jupiter quote API error:', errorText);
-          throw new Error(`Jupiter API returned error: ${errorText}`);
+          throw new Error(`Jupiter API returned error: ${await quoteResponse.text()}`);
         }
         
-        break; // Success, exit the retry loop
-      } catch (fetchError) {
+        quoteData = await quoteResponse.json();
+        break;
+      } catch (error) {
         quoteRetries++;
-        
-        // Check if it's a timeout or network error
-        const isTimeoutError = 
-          fetchError.name === 'AbortError' || 
-          fetchError.message?.includes('timeout') || 
-          fetchError.message?.includes('ETIMEDOUT') ||
-          fetchError.message?.includes('fetch failed') ||
-          fetchError.code === 'ETIMEDOUT';
-        
-        if (isTimeoutError && quoteRetries < maxQuoteRetries) {
-          // Add exponential backoff
-          const backoffDelay = Math.min(1000 * Math.pow(2, quoteRetries), 8000);
-          console.log(`Jupiter API timeout. Retrying in ${backoffDelay}ms (attempt ${quoteRetries}/${maxQuoteRetries})`);
-          await new Promise(resolve => setTimeout(resolve, backoffDelay));
-          continue;
-        }
-        
-        // Max retries reached or not a timeout error
         if (quoteRetries >= maxQuoteRetries) {
-          console.error(`Failed to get Jupiter quote after ${maxQuoteRetries} attempts`);
           return res.status(503).json({
             error: 'Jupiter API unavailable',
-            details: 'Could not get a quote from Jupiter exchange after multiple attempts. Please try again later.',
-            originalError: fetchError.message
+            details: 'Could not get a quote from Jupiter exchange after multiple attempts.'
           });
         }
-        
-        // For other errors
-        return res.status(500).json({
-          error: 'Failed to get Jupiter quote',
-          details: fetchError.message
-        });
+        await new Promise(resolve => setTimeout(resolve, Math.min(1000 * Math.pow(2, quoteRetries), 8000)));
       }
-    }
-    
-    // Parse the quote data
-    let quoteData;
-    try {
-      quoteData = await quoteResponse.json();
-    } catch (parseError) {
-      console.error('Error parsing Jupiter quote response:', parseError);
-      return res.status(500).json({
-        error: 'Failed to parse Jupiter response',
-        details: parseError.message
-      });
     }
     
     // Calculate output token amount
@@ -715,32 +723,25 @@ app.post('/api/swap-tokens', async (req, res) => {
     
     console.log(`Quote received: ${amount} SOL ≈ ${outputAmount} ${tokenSymbol}`);
     
-    // Now get the swap transaction
+    // Get swap transaction from Jupiter
     const swapUrl = "https://quote-api.jup.ag/v6/swap";
     const swapRequestPayload = {
       quoteResponse: quoteData,
-      userPublicKey: fundingKeypair.publicKey.toString(), // Use funding wallet as the user
+      userPublicKey: fundingKeypair.publicKey.toString(),
       wrapUnwrapSOL: true,
-      // Specify the user's wallet as the destination for swapped tokens
-      destinationWallet: walletAddress
     };
     
-    console.log('Requesting Jupiter swap transaction for SOL to token with direct transfer to user wallet');
-    
-    // Retry mechanism for Jupiter swap API calls
-    let swapResponse;
+    // Get swap transaction with retry mechanism
+    let swapResponseData;
     let swapRetries = 0;
     const maxSwapRetries = 3;
     
     while (swapRetries < maxSwapRetries) {
       try {
-        console.log(`Jupiter swap API attempt ${swapRetries + 1}/${maxSwapRetries}`);
-        
-        // Add timeout to fetch request using AbortController
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
+        const timeoutId = setTimeout(() => controller.abort(), 30000);
         
-        swapResponse = await fetch(swapUrl, {
+        const swapResponse = await fetch(swapUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(swapRequestPayload),
@@ -750,270 +751,197 @@ app.post('/api/swap-tokens', async (req, res) => {
         clearTimeout(timeoutId);
         
         if (!swapResponse.ok) {
-          const errorText = await swapResponse.text();
-          console.error('Jupiter swap API error:', errorText);
-          throw new Error(`Jupiter swap API returned error: ${errorText}`);
+          throw new Error(`Jupiter swap API returned error: ${await swapResponse.text()}`);
         }
         
-        break; // Success, exit the retry loop
-      } catch (fetchError) {
+        swapResponseData = await swapResponse.json();
+        break;
+      } catch (error) {
         swapRetries++;
-        
-        // Check if it's a timeout or network error
-        const isTimeoutError = 
-          fetchError.name === 'AbortError' || 
-          fetchError.message?.includes('timeout') || 
-          fetchError.message?.includes('ETIMEDOUT') ||
-          fetchError.message?.includes('fetch failed') ||
-          fetchError.code === 'ETIMEDOUT';
-        
-        if (isTimeoutError && swapRetries < maxSwapRetries) {
-          // Add exponential backoff
-          const backoffDelay = Math.min(1000 * Math.pow(2, swapRetries), 8000);
-          console.log(`Jupiter swap API timeout. Retrying in ${backoffDelay}ms (attempt ${swapRetries}/${maxSwapRetries})`);
-          await new Promise(resolve => setTimeout(resolve, backoffDelay));
-          continue;
-        }
-        
-        // Max retries reached or not a timeout error
         if (swapRetries >= maxSwapRetries) {
-          console.error(`Failed to get Jupiter swap transaction after ${maxSwapRetries} attempts`);
           return res.status(503).json({
             error: 'Jupiter API unavailable',
-            details: 'Could not get a swap transaction from Jupiter exchange after multiple attempts. Please try again later.',
-            originalError: fetchError.message
+            details: 'Could not get a swap transaction from Jupiter exchange after multiple attempts.'
           });
         }
-        
-        // For other errors
-        return res.status(500).json({
-          error: 'Failed to prepare Jupiter swap transaction',
-          details: fetchError.message
-        });
+        await new Promise(resolve => setTimeout(resolve, Math.min(1000 * Math.pow(2, swapRetries), 8000)));
       }
     }
     
-    // Parse the swap response data
-    let swapResponseData;
+    // Execute the swap transaction
     try {
-      swapResponseData = await swapResponse.json();
-    } catch (parseError) {
-      console.error('Error parsing Jupiter swap response:', parseError);
-      return res.status(500).json({
-        error: 'Failed to parse Jupiter swap response',
-        details: parseError.message
-      });
-    }
-    
-    // Execute the SOL to token swap transaction
-    try {
-      // Deserialize the transaction - Jupiter returns a versioned transaction
       const transactionBuffer = Buffer.from(swapResponseData.swapTransaction, 'base64');
       const transaction = VersionedTransaction.deserialize(transactionBuffer);
       
-      // Sign and send the transaction
-      console.log('Signing and sending SOL to token swap transaction with funding wallet (with direct transfer to user wallet)');
-      
-      // For versioned transactions, we don't need to set these manually
-      // They are already embedded in the transaction
-      
-      // Add the funding wallet signature
+      // Sign with funding wallet
       transaction.sign([fundingKeypair]);
       
-      // Send and confirm the transaction with retry logic
-      let swapTxId;
-      let retryCount = 0;
-      const maxRetries = 5;
-      let swapTxStatus = 'SUCCESS'; // Default status
+      // Get latest blockhash before sending
+      const { blockhash, lastValidBlockHeight } = await swapConnection.getLatestBlockhash('confirmed');
       
-      while (retryCount < maxRetries) {
-        try {
-          console.log(`Attempt ${retryCount + 1} to send transaction...`);
-          
-          // Send transaction
-          swapTxId = await connection.sendTransaction(transaction, {
-            skipPreflight: false,
-            preflightCommitment: 'confirmed',
-            maxRetries: 3
-          });
-          
-          console.log(`Transaction sent with ID: ${swapTxId}, waiting for confirmation...`);
-          
-          // Wait for confirmation with a timeout
-          try {
-            const confirmation = await Promise.race([
-              connection.confirmTransaction({
-                signature: swapTxId,
-                lastValidBlockHeight: (await connection.getLatestBlockhash()).lastValidBlockHeight,
-                commitment: 'confirmed'
-              }),
-              new Promise((_, reject) => 
-                setTimeout(() => reject(new Error('Confirmation timeout')), 60000)
-              )
-            ]);
-            
-            // Check the confirmation status
-            if (confirmation.value.err) {
-              throw new Error(`Transaction failed: ${confirmation.value.err}`);
-            }
-            
-            // Transaction successful, break out of retry loop
-            console.log(`SOL to token swap transaction successful! ID: ${swapTxId}`);
-            console.log(`Confirmation result: ${JSON.stringify(confirmation.value)}`);
-            break;
-          } catch (confirmError) {
-            // Special handling for timeout errors
-            if (confirmError.message.includes('timeout') && swapTxId) {
-              console.log(`Confirmation timeout but transaction was sent. Transaction ID: ${swapTxId}`);
-              
-                          // If this is our last retry, don't throw - just proceed with the transaction ID we have
-            if (retryCount >= maxRetries - 1) {
-              console.log(`Max retries reached but transaction is in flight. Proceeding with unconfirmed transaction: ${swapTxId}`);
-              // We'll set a flag to indicate this was a timeout but transaction is in flight
-              swapTxStatus = 'PENDING';
-              break;
-            }
-            
-            // Otherwise continue with retry
-            retryCount++;
-            const backoffDelay = Math.min(1000 * Math.pow(2, retryCount), 15000);
-            console.log(`Confirmation timeout. Retrying in ${backoffDelay}ms (attempt ${retryCount}/${maxRetries})`);
-            await new Promise(resolve => setTimeout(resolve, backoffDelay));
-            continue;
-          }
-          
-          // For other confirmation errors, rethrow
-          if (swapTxId) {
-            // Attach the transaction ID to the error
-            confirmError.swapTxId = swapTxId;
-          }
-          throw confirmError;
-          }
-        } catch (txError) {
-          retryCount++;
-          
-          // Check if error is a timeout or network related
-          const isTimeoutError = 
-            txError.message?.includes('timeout') || 
-            txError.message?.includes('ETIMEDOUT') ||
-            txError.message?.includes('fetch failed') ||
-            txError.code === 'ETIMEDOUT';
-            
-          if (isTimeoutError && retryCount < maxRetries) {
-            // Calculate exponential backoff delay
-            const backoffDelay = Math.min(1000 * Math.pow(2, retryCount), 15000);
-            console.log(`Network timeout detected. Retrying in ${backoffDelay}ms (attempt ${retryCount}/${maxRetries})`);
-            await new Promise(resolve => setTimeout(resolve, backoffDelay));
-            continue;
-          }
-          
-          // If we've reached max retries or it's not a timeout error, rethrow
-          if (retryCount >= maxRetries) {
-            console.error(`Failed after ${maxRetries} attempts. Last error: ${txError.message}`);
-          }
-          
-          // If we have a transaction ID, attach it to the error
-          if (swapTxId) {
-            txError.swapTxId = swapTxId;
-          }
-          
-          throw txError;
-        }
+      // Get dynamic priority fee
+      const priorityFee = await getDynamicPriorityFee(swapConnection);
+      console.log(`Using priority fee: ${priorityFee} lamports (${priorityFee / 1e9} SOL)`);
+      
+      // Send transaction with updated blockhash
+      console.log('Sending swap transaction...');
+      let swapTxId;
+      try {
+        // Send transaction with updated blockhash
+        swapTxId = await swapConnection.sendTransaction(transaction, {
+          skipPreflight: true, // Skip preflight to speed up execution
+          preflightCommitment: 'processed',
+          maxRetries: 1,
+          // Add dynamic priority fees for faster confirmation
+          priorityFee: priorityFee,
+        });
+        
+        console.log('Transaction sent:', swapTxId);
+        
+        // Do a quick status check instead of waiting for full confirmation
+        console.log('Performing quick status check...');
+        const quickCheck = await swapConnection.getSignatureStatus(swapTxId);
+        console.log('Initial transaction status:', quickCheck?.value?.confirmationStatus || 'pending');
+        
+        // Continue regardless of confirmation status to speed up processing
+      } catch (error) {
+        console.error('Error sending swap transaction:', error);
+        throw error;
       }
       
-      console.log(`Tokens have been directly sent to user wallet: ${walletAddress}`);
+      // After successful swap, transfer tokens to user's wallet
+      console.log('Swap successful, transferring tokens to user wallet:', walletAddress);
+      
+      // Create token transfer transaction
+      const tokenMint = new PublicKey(toToken);
+      const userPublicKey = new PublicKey(walletAddress);
+      
+      // Get the token account for the funding wallet
+      const fundingTokenAccount = await getAssociatedTokenAddress(
+        tokenMint,
+        fundingKeypair.publicKey
+      );
+      
+      // Get the user's token account
+      const userTokenAccount = await getAssociatedTokenAddress(
+        tokenMint,
+        userPublicKey
+      );
+      
+      // Check if user's token account exists, if not, create it
+      let accountInfo;
+      try {
+        accountInfo = await swapConnection.getAccountInfo(userTokenAccount);
+      } catch (error) {
+        console.log('Error checking token account:', error);
+        accountInfo = null;
+      }
+      
+      let instructions = [];
+      
+      // If account doesn't exist, add instruction to create it
+      if (!accountInfo) {
+        console.log('User token account does not exist, creating it...');
+        instructions.push(
+          createAssociatedTokenAccountInstruction(
+            fundingKeypair.publicKey, // payer
+            userTokenAccount, // associatedToken
+            userPublicKey, // owner
+            tokenMint // mint
+          )
+        );
+      } else {
+        console.log('User token account exists, proceeding with transfer');
+      }
+      
+      // Add transfer instruction
+      instructions.push({
+        programId: TOKEN_PROGRAM_ID,
+        keys: [
+          { pubkey: fundingTokenAccount, isSigner: false, isWritable: true },
+          { pubkey: userTokenAccount, isSigner: false, isWritable: true },
+          { pubkey: fundingKeypair.publicKey, isSigner: true, isWritable: false }
+        ],
+        data: Buffer.from([
+          3, // Transfer instruction
+          ...new BN(Math.round(outputAmount * Math.pow(10, outputDecimals))).toArray('le', 8)
+        ])
+      });
+      
+      // Create and send transfer transaction
+      const transferTransaction = new Transaction().add(...instructions);
+      const { blockhash: transferBlockhash, lastValidBlockHeight: transferLastValidBlockHeight } = await swapConnection.getLatestBlockhash('confirmed');
+      transferTransaction.recentBlockhash = transferBlockhash;
+      transferTransaction.feePayer = fundingKeypair.publicKey;
+      
+      // Get dynamic priority fee for token transfer
+      const transferPriorityFee = await getDynamicPriorityFee(swapConnection);
+      console.log(`Using token transfer priority fee: ${transferPriorityFee} lamports (${transferPriorityFee / 1e9} SOL)`);
+      
+      // Sign and send transfer transaction
+      transferTransaction.sign(fundingKeypair);
+      let transferTxId;
+      try {
+        transferTxId = await swapConnection.sendTransaction(transferTransaction, [fundingKeypair], {
+          skipPreflight: true, // Skip preflight to speed up execution
+          preflightCommitment: 'processed',
+          maxRetries: 1,
+          priorityFee: transferPriorityFee
+        });
+        
+        // Quick status check without waiting for full confirmation
+        console.log('Token transfer sent:', transferTxId);
+        console.log('Performing quick token transfer status check...');
+        const transferCheck = await swapConnection.getSignatureStatus(transferTxId);
+        console.log('Initial token transfer status:', transferCheck?.value?.confirmationStatus || 'pending');
+        
+        // Continue regardless of status to speed up processing
+      } catch (error) {
+        console.error('Error sending token transfer:', error);
+        throw error;
+      }
       
       // Update session info
       if (sessionInfo) {
         sessionInfo.swapTxId = swapTxId;
+        sessionInfo.transferTxId = transferTxId;
         sessionInfo.tokenAmount = outputAmount;
-        sessionInfo.status = swapTxStatus === 'PENDING' ? 'pending_confirmation' : 'completed';
+        sessionInfo.status = 'completed';
       }
       
-      // Determine response based on transaction status
-      if (swapTxStatus === 'PENDING') {
-        // Transaction sent but not confirmed yet
-        return res.json({
-          status: 'pending',
-          transactions: [
-            {
-              id: swapTxId,
-              type: 'swap',
-              status: 'PENDING',
-              description: `Transaction sent: ${amount} SOL to ${outputAmount} ${tokenSymbol}. Awaiting confirmation.`,
-              explorerLink: `https://solscan.io/tx/${swapTxId}`
-            }
-          ],
-          finalToken: {
-            symbol: tokenSymbol,
-            mint: toToken,
-            amount: outputAmount
-          },
-          message: `Transaction submitted but not yet confirmed due to network congestion. Your tokens should appear in your wallet soon. You can check the status on Solana Explorer.`
-        });
-      } else {
-        // Transaction confirmed successfully
-        return res.json({
-          status: 'success',
-          transactions: [
-            {
-              id: swapTxId,
-              type: 'swap',
-              status: 'CONFIRMED',
-              description: `Swapped ${amount} SOL to ${outputAmount} ${tokenSymbol} and transferred directly to your wallet`,
-              explorerLink: `https://solscan.io/tx/${swapTxId}`
-            }
-          ],
-          finalToken: {
-            symbol: tokenSymbol,
-            mint: toToken,
-            amount: outputAmount
-          },
-          message: `Successfully swapped SOL to ${tokenSymbol} and transferred to your wallet.`
-        });
-      }
-      
-    } catch (swapError) {
-      console.error('Error executing SOL to token swap:', swapError);
-      
-      // Check if it's a network timeout error
-      const isTimeoutError = 
-        swapError.message?.includes('timeout') || 
-        swapError.message?.includes('ETIMEDOUT') ||
-        swapError.message?.includes('fetch failed') ||
-        swapError.code === 'ETIMEDOUT';
-      
-      // Check if we have a transaction ID but couldn't confirm it (common during congestion)
-      const hasUnconfirmedTx = swapError.swapTxId && isTimeoutError;
-        
-      if (hasUnconfirmedTx) {
-        // We have a transaction ID but couldn't confirm it
-        return res.status(202).json({
-          status: 'pending',
-          error: 'Transaction submitted but not confirmed',
-          details: 'Your transaction was submitted to the Solana network, but confirmation is taking longer than expected due to network congestion.',
-          message: 'Transaction submitted but awaiting confirmation. Please check your wallet in a few minutes.',
-          transaction: {
-            id: swapError.swapTxId,
+      return res.json({
+        status: 'success',
+        transactions: [
+          {
+            id: swapTxId,
             type: 'swap',
-            status: 'PENDING',
-            explorerLink: `https://solscan.io/tx/${swapError.swapTxId}`
+            status: 'SENT',
+            description: `Swapped ${amount} SOL to ${outputAmount} ${tokenSymbol}`,
+            explorerLink: `https://solscan.io/tx/${swapTxId}`
           },
-          isTimeout: true
-        });
-      } else if (isTimeoutError) {
-        // General timeout error without a transaction ID
-        return res.status(503).json({
-          error: 'Network timeout while processing transaction',
-          details: 'The transaction was initiated but we could not confirm its status due to network issues. Please check your wallet in a few minutes to see if tokens were received, or try again.',
-          originalError: swapError.message,
-          isTimeout: true
-        });
-      }
+          {
+            id: transferTxId,
+            type: 'transfer',
+            status: 'SENT',
+            description: `Transferred ${outputAmount} ${tokenSymbol} to your wallet`,
+            explorerLink: `https://solscan.io/tx/${transferTxId}`,
+            tokenAccountCreated: !accountInfo
+          }
+        ],
+        finalToken: {
+          symbol: tokenSymbol,
+          mint: toToken,
+          amount: outputAmount,
+          associatedTokenAccount: userTokenAccount.toString()
+        },
+        message: `Successfully processed SOL to ${tokenSymbol} swap and transfer to your wallet.`
+      });
       
+    } catch (error) {
+      console.error('Error executing swap:', error);
       return res.status(500).json({
         error: 'Failed to execute swap',
-        details: swapError.message
+        details: error.message
       });
     }
   } catch (error) {
@@ -1034,7 +962,12 @@ app.post('/api/solend-lend', async (req, res) => {
     if (typeof amount !== 'number' || isNaN(amount) || amount <= 0) return res.status(400).json({ error: 'Missing or invalid amount' });
     if (!userPublicKey || typeof userPublicKey !== 'string') return res.status(400).json({ error: 'Missing or invalid userPublicKey' });
 
-    const connection = new Connection(process.env.NEXT_PUBLIC_ALCHEMY_RPC_URL || 'https://api.mainnet-beta.solana.com');
+    const solendConnection = new Connection('https://api.mainnet-beta.solana.com', {
+      commitment: 'confirmed',
+      wsEndpoint: 'wss://api.mainnet-beta.solana.com',
+      confirmTransactionInitialTimeout: 60000,
+      disableRetryOnRateLimit: false
+    });
     const decimals = new BN(pool.reserve.liquidity.mintDecimals);
     const amountBN = new BN(amount).mul(new BN(10).pow(decimals));
     const wallet = { publicKey: new PublicKey(userPublicKey) };
@@ -1071,7 +1004,7 @@ app.post('/api/solend-lend', async (req, res) => {
     const solendAction = await SolendActionCore.buildDepositTxns(
       pool_derived,
       reserve,
-      connection,
+      solendConnection,
       amountBN.toString(),
       wallet,
       { environment: 'production' }

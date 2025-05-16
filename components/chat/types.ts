@@ -94,4 +94,13 @@ export interface SwapWidget {
   outputAmount: number;
   priceImpact: string;
   exchangeRate: number;
+}
+
+export interface Token {
+  symbol: string;
+  name: string;
+  address: string;
+  decimals: number;
+  logoURI: string;
+  coingeckoId: string;
 } 

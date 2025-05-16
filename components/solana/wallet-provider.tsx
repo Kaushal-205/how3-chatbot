@@ -1,11 +1,9 @@
 "use client"
 
-import { type FC, type ReactNode, useMemo, useState, useCallback, useEffect } from "react"
+import { type FC, type ReactNode, useMemo, useState, useCallback } from "react"
 import { WalletAdapterNetwork } from "@solana/wallet-adapter-base"
 import { ConnectionProvider, WalletProvider } from "@solana/wallet-adapter-react"
 import { WalletModalProvider } from "@solana/wallet-adapter-react-ui"
-import { PhantomWalletAdapter } from "@solana/wallet-adapter-phantom"
-import { SolflareWalletAdapter } from "@solana/wallet-adapter-solflare"
 import { clusterApiUrl } from "@solana/web3.js"
 import { usePrivyAdapter } from "@/components/privy/privy-adapter"
 
@@ -26,13 +24,10 @@ export const SolanaWalletProvider: FC<SolanaWalletProviderProps> = ({ children }
   // Get the Privy wallet adapter
   const { adapter: privyAdapter } = usePrivyAdapter()
 
-  // @solana/wallet-adapter-wallets includes all the adapters but supports tree shaking
-  // so only the wallets you configure here will be compiled into your application
+  // Only use Privy adapter
   const wallets = useMemo(() => {
-    const baseWallets = [new PhantomWalletAdapter(), new SolflareWalletAdapter()]
-    // Add the Privy adapter if it exists
-    return privyAdapter ? [...baseWallets, privyAdapter] : baseWallets
-  }, [network, privyAdapter])
+    return privyAdapter ? [privyAdapter] : []
+  }, [privyAdapter])
 
   // Add persistent connection state
   const [isConnecting, setIsConnecting] = useState(false)

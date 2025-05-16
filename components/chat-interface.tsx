@@ -22,7 +22,7 @@ import { SwapWidget } from './chat/SwapWidget'
 import { SolendPoolsWidget } from './chat/SolendPoolsWidget'
 import { LendingConfirmWidget } from './chat/LendingConfirmWidget'
 import { ChatInputArea } from './chat/ChatInputArea'
-import { SolendPool } from './chat/types'
+import { SolendPool, Message } from './chat/types'
 
 export default function ChatInterface() {
   // Use the custom hooks to manage state
@@ -70,7 +70,7 @@ export default function ChatInterface() {
   //   getOrder: getRaydiumOrder,
   //   executeSwap,
   //   clearOrder: clearRaydiumOrder,
-  //   clearResult: clearSwapResult,
+  //   clearResult: clearResult,
   //   swapQuoteWidget,
   //   setSwapQuoteWidget,
   //   isSwapProcessing,
@@ -252,7 +252,8 @@ export default function ChatInterface() {
     const handlePaymentMessage = async (event: MessageEvent) => {
       if (event.data && typeof event.data === 'object' && event.data.type === 'PAYMENT_COMPLETE') {
         console.log('Received payment complete message:', event.data);
-        const { walletAddress, sessionId, amount, isTokenSwap, tokenSymbol, tokenAddress, tokenAmount } = event.data;
+        const { 
+          walletAddress, sessionId, amount, isTokenSwap, tokenSymbol, tokenAddress, tokenAmount } = event.data;
         
         // Add loading message with spinner
         const loadingMsgId = generateMessageId();
@@ -275,6 +276,7 @@ export default function ChatInterface() {
         // Get the wallet address to use
         const targetWalletAddress = walletAddress || walletParam || activeWalletAddress;
         
+        
         if (!targetWalletAddress) {
           setMessages(prev => prev.map(msg => 
             msg.messageId === loadingMsgId 
@@ -286,15 +288,15 @@ export default function ChatInterface() {
         
         try {
           // Handle differently based on whether it's a token swap or direct SOL purchase
-          if (isTokenSwap && tokenAddress && tokenSymbol) {
+          if (isTokenSwap) {
             // For token swap, call the swap-tokens endpoint
+            console.log('Calling API: /api/swap-tokens');
             const swapResponse = await fetch(`${config.apiUrl}/api/swap-tokens`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
                 walletAddress: targetWalletAddress,
                 sessionId,
-                fromToken: 'SOL',
                 toToken: tokenAddress,
                 amount: parseFloat(amount) || 0.1,
               }),
@@ -302,13 +304,11 @@ export default function ChatInterface() {
             
             console.log('Swap response status:', swapResponse.status);
             
-            // If there's a 500 error, log more details
-            if (swapResponse.status === 500) {
+            if (!swapResponse.ok) {
               const errorText = await swapResponse.text();
-              console.error('Swap API error (500):', errorText);
+              console.error('Swap API error:', errorText);
               
-              // Show error to user
-              setMessages(prev => prev.map(msg => 
+              setMessages((prev: Message[]) => prev.map((msg: Message) => 
                 msg.messageId === loadingMsgId 
                   ? {
                       ...msg, 
@@ -320,214 +320,99 @@ export default function ChatInterface() {
             }
             
             const swapResult = await swapResponse.json();
-            
             console.log('Swap result:', swapResult);
             
-            if (swapResult.status === 'success') {
-              // We need to complete the swap transaction using the user's wallet
-              if (swapResult.solToUsdcSwap && swapResult.solToUsdcSwap.transaction) {
-                try {
-                  // Update message to show we're now executing the swap
-                  setMessages(prev => prev.map(msg => 
-                    msg.messageId === loadingMsgId 
-                      ? {
-                          ...msg, 
-                          content: `Payment successful! Now swapping ${amount || 0.1} SOL to USDC first, and then to ${tokenSymbol} if needed. Please approve the transaction in your wallet when prompted.`
-                        }
-                      : msg
-                  ));
-                  
-                  // Execute the first swap transaction (SOL to USDC)
-                  let usdcSwapSignature;
-                  const connection = new Connection(process.env.NEXT_PUBLIC_ALCHEMY_RPC_URL || clusterApiUrl('mainnet-beta'));
-                  
-                  // Convert the transaction data from base64 to a Transaction object
-                  const solToUsdcTransactionBuffer = Buffer.from(swapResult.solToUsdcSwap.transaction, 'base64');
-                  const solToUsdcTransaction = VersionedTransaction.deserialize(solToUsdcTransactionBuffer);
-                  
-                  // Execute the transaction based on which wallet is connected
-                  if (isAuthenticated && privySendTransaction) {
-                    // Use Privy wallet
-                    usdcSwapSignature = await privySendTransaction(solToUsdcTransaction, connection);
-                  } else if (connected && publicKey && sendTransaction) {
-                    // Use Solana wallet adapter
-                    usdcSwapSignature = await sendTransaction(solToUsdcTransaction, connection);
-                  } else {
-                    throw new Error("No wallet available to send transaction");
-                  }
-                  
-                  // Show waiting for confirmation message
-                  setMessages(prev => prev.map(msg => 
-                    msg.messageId === loadingMsgId 
-                      ? {
-                          ...msg, 
-                          content: `<div class="flex items-center gap-2"><span>SOL to USDC swap transaction submitted! Waiting for confirmation...</span><div class="ml-2 h-4 w-4 animate-spin rounded-full border-2 border-solid border-brand-purple border-t-transparent"></div></div>`
-                        }
-                      : msg
-                  ));
-                  
-                  try {
-                    // Wait for the transaction to confirm
-                    await connection.confirmTransaction(usdcSwapSignature, 'confirmed');
-                    
-                    // Check if there's a second swap needed (USDC to token)
-                    if (swapResult.usdcToTokenSwap) {
-                      setMessages(prev => prev.map(msg => 
-                        msg.messageId === loadingMsgId 
-                          ? {
-                              ...msg, 
-                              content: `SOL to USDC swap confirmed! Now swapping USDC to ${tokenSymbol}. Please approve the next transaction in your wallet.`
-                            }
-                          : msg
-                      ));
-                      
-                      // Execute the second swap (USDC to token)
-                      const usdcToTokenTransactionBuffer = Buffer.from(swapResult.usdcToTokenSwap.transaction, 'base64');
-                      const usdcToTokenTransaction = VersionedTransaction.deserialize(usdcToTokenTransactionBuffer);
-                      
-                      let tokenSwapSignature;
-                      if (isAuthenticated && privySendTransaction) {
-                        tokenSwapSignature = await privySendTransaction(usdcToTokenTransaction, connection);
-                      } else if (connected && publicKey && sendTransaction) {
-                        tokenSwapSignature = await sendTransaction(usdcToTokenTransaction, connection);
-                      } else {
-                        throw new Error("No wallet available to send transaction");
-                      }
-                      
-                      // Show waiting for second confirmation
-                      setMessages(prev => prev.map(msg => 
-                        msg.messageId === loadingMsgId 
-                          ? {
-                              ...msg, 
-                              content: `<div class="flex items-center gap-2"><span>USDC to ${tokenSymbol} swap transaction submitted! Waiting for confirmation...</span><div class="ml-2 h-4 w-4 animate-spin rounded-full border-2 border-solid border-brand-purple border-t-transparent"></div></div>`
-                            }
-                          : msg
-                      ));
-                      
-                      // Wait for the second transaction to confirm
-                      await connection.confirmTransaction(tokenSwapSignature, 'confirmed');
-                      
-                      // Update final success message
-                      setMessages(prev => prev.map(msg => 
-                        msg.messageId === loadingMsgId 
-                          ? {
-                              ...msg, 
-                              content: `Successfully completed your purchase! ${swapResult.finalToken.amount.toFixed(6)} ${swapResult.finalToken.symbol} has been sent to your wallet. [View transaction](https://solscan.io/tx/${tokenSwapSignature})`
-                            }
-                          : msg
-                      ));
-                    } else {
-                      // Only USDC swap was done
-                      setMessages(prev => prev.map(msg => 
-                        msg.messageId === loadingMsgId 
-                          ? {
-                              ...msg, 
-                              content: `Successfully swapped SOL to ${swapResult.solToUsdcSwap.usdcAmount.toFixed(6)} USDC! [View transaction](https://solscan.io/tx/${usdcSwapSignature})`
-                            }
-                          : msg
-                      ));
-                    }
-                    
-                    // Offer passive income options after short delay for the purchased token
-                    setTimeout(() => {
-                      handlePassiveIncomePrompt(swapResult.finalToken.symbol);
-                    }, 1000);
-                  } catch (confirmError: any) {
-                    // Handle confirmation error
-                    console.error('Error confirming swap transaction:', confirmError);
-                    
-                    setMessages(prev => prev.map(msg => 
-                      msg.messageId === loadingMsgId 
-                        ? {
-                            ...msg, 
-                            content: `Swap transaction was submitted but we couldn't confirm if it completed. You can check your wallet for ${swapResult.finalToken.symbol} tokens or view the transaction: [View transaction](https://solscan.io/tx/${usdcSwapSignature})`
-                          }
-                        : msg
-                    ));
-                  }
-                } catch (swapError: any) {
-                  console.error('Error executing swap transaction:', swapError);
-                  
-                  // If the transaction fails, show an error and the manual link
-                  setMessages(prev => prev.map(msg => 
-                    msg.messageId === loadingMsgId 
-                      ? {
-                          ...msg, 
-                          content: `Payment successful, but the automatic swap failed: ${swapError.message || 'Transaction error'}. Please try again later.`
-                        }
-                      : msg
-                  ));
-                }
-              } else {
-                // No swap transaction data
-                setMessages(prev => prev.map(msg => 
-                  msg.messageId === loadingMsgId 
-                    ? {
-                        ...msg, 
-                        content: `Payment successful but we couldn't prepare the swap transaction. Please try again later.`
-                      }
-                    : msg
-                ));
-              }
-            } else if (swapResult.status === 'partial_success') {
-              // SOL transferred but swap failed
-              setMessages(prev => prev.map(msg => 
+            if (swapResult.status === 'success' || swapResult.status === 'pending') {
+              // Update message with transaction details
+              setMessages((prev: Message[]) => prev.map((msg: Message) => 
                 msg.messageId === loadingMsgId 
                   ? {
                       ...msg, 
-                      content: `${swapResult.message || 'Payment successful but swap preparation failed.'}`
+                      content: `${swapResult.message}\n\nTransactions:\n${swapResult.transactions.map((tx: any) => 
+                        `- ${tx.description}: [View](${tx.explorerLink})`
+                      ).join('\n')}`
                     }
                   : msg
               ));
+              
+              // Clear any loading states
+              setIsSwapProcessing(false);
+              setSwapQuoteWidget(null);
+              
+              // Offer passive income options after short delay
+              setTimeout(() => {
+                handlePassiveIncomePrompt(tokenSymbol);
+              }, 1000);
             } else {
               // Update with error message
-              setMessages(prev => prev.map(msg => 
+              setMessages((prev: Message[]) => prev.map((msg: Message) => 
                 msg.messageId === loadingMsgId 
                   ? {...msg, content: `Error processing token swap: ${swapResult.error || 'Unknown error'}`} 
                   : msg
               ));
+              
+              // Clear loading states on error
+              setIsSwapProcessing(false);
+              setSwapQuoteWidget(null);
             }
           } else {
             // For direct SOL purchase, call the transfer-sol endpoint
+            console.log('Calling API: /api/transfer-sol');
             const transferResponse = await fetch(`${config.apiUrl}/api/transfer-sol`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
                 walletAddress: targetWalletAddress,
                 amount: parseFloat(amount) || 0.1,
-                sessionId
+                sessionId,
               }),
             });
             
-            const result = await transferResponse.json();
-            
-            if (result.status === 'success') {
-              // Create explorer link
-              const explorerLink = result.explorerLink;
+            if (!transferResponse.ok) {
+              const errorText = await transferResponse.text();
+              console.error('Transfer API error:', errorText);
               
-              // Update loading message with success and link
-              setMessages(prev => prev.map(msg => 
+              setMessages((prev: Message[]) => prev.map((msg: Message) => 
                 msg.messageId === loadingMsgId 
-                  ? {...msg, content: `Successfully sent ${amount || 0.1} SOL to your wallet! [View transaction](${explorerLink})`} 
+                  ? {
+                      ...msg, 
+                      content: `Error preparing transfer: ${errorText || 'Unknown server error'}`
+                    } 
                   : msg
               ));
-              
-              // Offer passive income options after short delay
+              return;
+            }
+            
+            const transferResult = await transferResponse.json();
+            console.log('Transfer result:', transferResult);
+            
+            if (transferResult.status === 'success') {
+              // Update message with transaction details
+              setMessages((prev: Message[]) => prev.map((msg: Message) => 
+                msg.messageId === loadingMsgId 
+                  ? {
+                      ...msg, 
+                      content: `Successfully sent ${amount} SOL to your wallet! [View transaction](${transferResult.explorerLink})`
+                    }
+                  : msg
+              ));
+
+              // Add this to show passive income options for SOL
               setTimeout(() => {
                 handlePassiveIncomePrompt("SOL");
               }, 1000);
             } else {
               // Update with error message
-              setMessages(prev => prev.map(msg => 
+              setMessages((prev: Message[]) => prev.map((msg: Message) => 
                 msg.messageId === loadingMsgId 
-                  ? {...msg, content: `Error sending SOL: ${result.error || 'Unknown error'}`} 
+                  ? {...msg, content: `Error processing transfer: ${transferResult.error || 'Unknown error'}`} 
                   : msg
               ));
             }
           }
         } catch (error) {
           console.error('Error during transfer:', error);
-          setMessages(prev => prev.map(msg => 
+          setMessages((prev: Message[]) => prev.map((msg: Message) => 
             msg.messageId === loadingMsgId 
               ? {...msg, content: `Error processing your payment: ${error instanceof Error ? error.message : 'Unknown error'}`} 
               : msg
@@ -700,61 +585,69 @@ export default function ChatInterface() {
       return;
     }
 
-    // Find token in the token list
-    const token = findToken(tokenName);
-    if (!token) {
-      setMessages(prev => [...prev, {
-        role: "assistant",
-        content: `Sorry, I couldn't find the token "${tokenName}" in our supported tokens list.`,
-        messageId: generateMessageId()
-      }]);
-      return;
-    }
-
     try {
       const loadingMsgId = generateMessageId();
       setMessages(prev => [...prev, {
         role: "assistant",
-        content: `Getting current price for ${amount} ${token.symbol} and preparing payment...`,
+        content: `Getting current price for ${amount} ${tokenName} and preparing payment...`,
         messageId: loadingMsgId
       }]);
 
-      // First get a quote for the token to determine the SOL amount needed
-      const quoteResponse = await fetch(`${config.apiUrl}/api/get-swap-quote`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          outputMint: token.address,
-          amount: 0.1, // Use a fixed SOL amount to get exchange rate
-        }),
-      });
-
-      const quoteData = await quoteResponse.json();
-      
-      if (!quoteData.success) {
+      // First find the token in our local token list
+      const token = findToken(tokenName);
+      if (!token) {
         setMessages(prev => prev.map(msg =>
           msg.messageId === loadingMsgId
-            ? { ...msg, content: `Error: ${quoteData.error || 'Could not get price quote for this token'}` }
+            ? { ...msg, content: `Sorry, I couldn't find the token "${tokenName}" in our supported tokens list.` }
             : msg
         ));
         return;
       }
 
-      // Calculate SOL needed for the desired token amount based on exchange rate
-      const solNeeded = amount / (quoteData.outputAmountToken / 0.1);
+      // Get the token price from CoinGecko
+      console.log('Calling API: CoinGecko price API');
+      const tokenPriceResponse = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${token.coingeckoId}&vs_currencies=usd`);
+      const tokenPriceData = await tokenPriceResponse.json();
+      const tokenPrice = tokenPriceData[token.coingeckoId].usd;
+
+      // Calculate the dollar amount needed for the desired token amount
+      const dollarAmount = amount * tokenPrice;
+      
+      console.log('Price calculation:', {
+        tokenName,
+        tokenPrice,
+        dollarAmount,
+        tokenAmount: amount,
+        tokenAddress: token.address
+      });
       
       // Now create the Stripe checkout session for the token purchase
-      const response = await proceedToCheckout({
-        solAmount: solNeeded,
+      const checkoutParams = {
+        dollarAmount: dollarAmount,
         tokenSymbol: token.symbol,
         tokenAddress: token.address,
         tokenAmount: amount
-      });
+      };
+      
+      console.log('Proceeding to checkout with:', checkoutParams);
+      
+      const response = await proceedToCheckout(checkoutParams);
+      
+      // Verify the response indicates this is a token swap
+      if (!response.isTokenSwap) {
+        console.error('Backend did not recognize this as a token swap:', response);
+        setMessages(prev => prev.map(msg =>
+          msg.messageId === loadingMsgId
+            ? { ...msg, content: `Error: The backend did not recognize this as a token purchase. Please try again or contact support.` }
+            : msg
+        ));
+        return;
+      }
       
       // Update the loading message with success message
       setMessages(prev => prev.map(msg =>
         msg.messageId === loadingMsgId
-          ? { ...msg, content: `Opening Stripe payment page. Please complete your purchase to receive ${amount} ${token.symbol} tokens.` }
+          ? { ...msg, content: `Opening Stripe payment page. Please complete your purchase of $${dollarAmount.toFixed(2)} to receive ${amount} ${token.symbol} tokens.` }
           : msg
       ));
     } catch (error) {

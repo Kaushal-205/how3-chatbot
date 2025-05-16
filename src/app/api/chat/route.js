@@ -7,7 +7,7 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-const connection = new Connection(process.env.NEXT_PUBLIC_ALCHEMY_RPC_URL || 'https://api.mainnet-beta.solana.com');
+const connection = new Connection('https://api.mainnet-beta.solana.com');
 const jupiter = new Jupiter(connection);
 
 export async function POST(req) {

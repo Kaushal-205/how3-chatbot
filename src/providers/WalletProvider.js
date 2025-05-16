@@ -12,7 +12,7 @@ require('@solana/wallet-adapter-react-ui/styles.css');
 
 // Public RPC endpoints
 const RPC_ENDPOINTS = {
-  [WalletAdapterNetwork.Mainnet]: process.env.NEXT_PUBLIC_ALCHEMY_RPC_URL || 'https://api.mainnet-beta.solana.com',
+  [WalletAdapterNetwork.Mainnet]: 'https://api.mainnet-beta.solana.com',
   [WalletAdapterNetwork.Devnet]: 'https://api.devnet.solana.com',
   [WalletAdapterNetwork.Testnet]: 'https://api.testnet.solana.com',
 };

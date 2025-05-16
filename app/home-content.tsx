@@ -18,7 +18,7 @@ const DynamicChatInterface = dynamic(
 
 export function HomeContent() {
   return (
-    <PageContainer title="Chat with YieldAgent">
+    <PageContainer title="Chat with How3-Chatbot">
       <div className="flex-1 overflow-hidden">
         <DynamicChatInterface />
       </div>

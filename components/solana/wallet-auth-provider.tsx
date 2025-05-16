@@ -95,7 +95,7 @@ export const WalletAuthProvider = ({ children }: WalletAuthProviderProps) => {
       setAuthError(null)
 
       // Create a challenge message with timestamp to prevent replay attacks
-      const message = `Sign this message to authenticate with YieldAgent: ${Date.now()}`
+      const message = `Sign this message to authenticate with How3-Chatbot: ${Date.now()}`
       const encodedMessage = new TextEncoder().encode(message)
 
       // Request signature from the wallet

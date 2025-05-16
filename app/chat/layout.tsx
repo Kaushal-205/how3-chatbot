@@ -11,7 +11,7 @@ export default function ChatLayout({
     <div className="flex w-full min-h-screen bg-background">
       <AppSidebar />
       <div className="flex flex-col flex-1 w-full">
-        <Header title={"Chat with YieldAgent"} />
+        <Header title={"Chat with How3-Chatbot"} />
         <main className="flex-1 w-full overflow-auto p-4 md:p-6">
           {children}
         </main>

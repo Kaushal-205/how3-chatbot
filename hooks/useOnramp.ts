@@ -42,6 +42,9 @@ interface UseOnrampReturn {
     fiatAmount: number;
     fiatCurrency: string;
     sessionId: string;
+    isTokenSwap: boolean;
+    tokenSymbol: string | null;
+    tokenAmount: number | null;
   }>;
 }
 

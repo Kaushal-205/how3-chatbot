@@ -14,12 +14,19 @@ For buy token requests, parse the amount and token name. Examples:
 - "Buy 5 Trump token" -> { "intent": "buy_token", "amount": 5, "token": "TRUMP" }
 - "Get me 20 BONK" -> { "intent": "buy_token", "amount": 20, "token": "BONK" }
 
+For yield/lending requests, identify the token. Examples:
+- "Show me lending options for SOL" -> { "intent": "explore_yield", "token": "SOL", "message": "Looking up lending options for SOL..." }
+- "What yield can I get on USDC?" -> { "intent": "explore_yield", "token": "USDC", "message": "Let me check yield options for USDC" }
+- "How can I earn interest with my BONK" -> { "intent": "explore_yield", "token": "BONK", "message": "Here are ways to earn with BONK" }
+
+IMPORTANT: Any question about lending, yield, earning, staking, or depositing should be classified as "explore_yield" intent.
+
 For each response, return a structured JSON with:
 {
   "intent": "buy_sol" | "buy_token" | "explore_yield" | "view_portfolio" | "out_of_scope",
   "amount": number | null,  // Required for buy_sol and buy_token intents
   "currency": "SOL",       // Required for buy_sol intent
-  "token": string,         // Required for buy_token intent
+  "token": string,         // Required for buy_token intent and explore_yield intent
   "message": string        // User-friendly response
 }
 
@@ -31,9 +38,12 @@ export function generateMessageId(): string {
 }
 
 export function getAlchemyConnection(): Connection {
-    // Use mainnet with Alchemy RPC
-    return new Connection(process.env.NEXT_PUBLIC_ALCHEMY_RPC_URL || 'https://api.mainnet-beta.solana.com');
-  }
+    // Try Alchemy if available, otherwise use public RPC
+    const endpoint = process.env.NEXT_PUBLIC_ALCHEMY_RPC_URL || 'https://api.mainnet-beta.solana.com';
+    
+    // Create connection with 'confirmed' commitment and no WebSocket
+    return new Connection(endpoint, 'confirmed');
+}
 
 // Improved helper to extract token symbol from user input for yield intent
 export function extractTokenSymbolFromYieldQuery(query: string): string | null {
@@ -45,7 +55,9 @@ export function extractTokenSymbolFromYieldQuery(query: string): string | null {
     /invest(?: in)? (\w+)/i,
     /lend(?: my)? (\w+)/i,
     /deposit(?: my)? (\w+)/i,
-    /stake(?: my)? (\w+)/i
+    /stake(?: my)? (\w+)/i,
+    /lending(?: options?)?(?: for)? (\w+)/i,  // Match "lending options for X"
+    /loan(?: options?)?(?: for)? (\w+)/i      // Match "loan options for X"
   ];
   
   for (const pattern of patterns) {
@@ -58,6 +70,33 @@ export function extractTokenSymbolFromYieldQuery(query: string): string | null {
 
 // Process LLM response
 export async function processLLMResponse(userMessage: string): Promise<LLMResponse> {
+  // Check for known yield/lending patterns without LLM call to avoid any misclassification
+  if (userMessage.toLowerCase().includes('lending') || 
+      userMessage.toLowerCase().includes('lend') ||
+      userMessage.toLowerCase().includes('yield') ||
+      userMessage.toLowerCase().includes('earn') ||
+      userMessage.toLowerCase().includes('deposit') ||
+      userMessage.toLowerCase().includes('stake') ||
+      userMessage.toLowerCase().includes('interest')) {
+    
+    // Try to extract token symbol directly from user message
+    const tokenSymbol = extractTokenSymbolFromYieldQuery(userMessage);
+    
+    if (tokenSymbol) {
+      return {
+        intent: "explore_yield",
+        token: tokenSymbol,
+        message: `Looking up yield options for ${tokenSymbol}...`
+      };
+    } else {
+      // No specific token found, but still a yield query
+      return {
+        intent: "explore_yield",
+        message: "Which token would you like to explore lending options for?"
+      };
+    }
+  }
+
   const apiKey = process.env.NEXT_PUBLIC_TOGETHER_API_KEY;
   
   if (!apiKey) {
@@ -106,11 +145,53 @@ export async function processLLMResponse(userMessage: string): Promise<LLMRespon
       if (!parsedResponse.intent || !parsedResponse.message) {
         throw new Error('Invalid response format');
       }
+      
+      // Double-check yield intent with our keyword check
+      if (userMessage.toLowerCase().includes('lending') || 
+          userMessage.toLowerCase().includes('lend') ||
+          userMessage.toLowerCase().includes('yield') ||
+          userMessage.toLowerCase().includes('earn') ||
+          userMessage.toLowerCase().includes('deposit') ||
+          userMessage.toLowerCase().includes('stake') ||
+          userMessage.toLowerCase().includes('interest')) {
+        
+        // Force yield intent even if LLM didn't catch it
+        parsedResponse.intent = "explore_yield";
+        
+        // Try to extract token if not already present
+        if (!parsedResponse.token) {
+          const extractedToken = extractTokenSymbolFromYieldQuery(userMessage);
+          if (extractedToken) {
+            parsedResponse.token = extractedToken;
+          }
+        }
+      }
+      
       return parsedResponse;
     } catch (e) {
       // If JSON parsing fails, analyze the text response
       console.log('LLM returned non-JSON response:', content);
       
+      // Check if this is a lending/yield query first
+      if (userMessage.toLowerCase().includes('lending') || 
+          userMessage.toLowerCase().includes('lend') ||
+          userMessage.toLowerCase().includes('yield') ||
+          userMessage.toLowerCase().includes('earn') ||
+          userMessage.toLowerCase().includes('deposit') ||
+          userMessage.toLowerCase().includes('stake') ||
+          userMessage.toLowerCase().includes('interest')) {
+        
+        const extractedToken = extractTokenSymbolFromYieldQuery(userMessage);
+        return {
+          intent: "explore_yield",
+          token: extractedToken || undefined,
+          message: extractedToken 
+            ? `Looking up yield options for ${extractedToken}...` 
+            : "Which token would you like to explore lending options for?"
+        };
+      }
+      
+      // Then check other intents as fallback
       // Check if the response contains a buy SOL request
       const solMatch = content.match(/buy\s+(\d+(?:\.\d+)?)\s*sol/i);
       if (solMatch) {
@@ -137,10 +218,21 @@ export async function processLLMResponse(userMessage: string): Promise<LLMRespon
       }
 
       // Check for other intents
-      if (content.toLowerCase().includes('yield') || content.toLowerCase().includes('earn')) {
+      if (content.toLowerCase().includes('yield') || 
+          content.toLowerCase().includes('earn') || 
+          content.toLowerCase().includes('lending') || 
+          content.toLowerCase().includes('lend') ||
+          content.toLowerCase().includes('deposit') ||
+          content.toLowerCase().includes('stake')) {
+        // This should never be reached because of our earlier checks
+        // But keeping as a safety fallback
+        const tokenSymbol = extractTokenSymbolFromYieldQuery(userMessage);
         return {
           intent: "explore_yield",
-          message: content
+          token: tokenSymbol || undefined,
+          message: tokenSymbol 
+            ? `Looking up yield options for ${tokenSymbol}...` 
+            : "Which token would you like to explore lending options for?"
         };
       }
 
