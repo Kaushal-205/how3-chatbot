@@ -38,38 +38,61 @@ try {
   console.error("Error initializing funding wallet:", error);
 }
 
-// Function to get current SOL price
+// Base URLs for Birdeye API
+const BIRDEYE_API_BASE = 'https://public-api.birdeye.so';
+const SOL_TOKEN_ADDRESS = 'So11111111111111111111111111111111111111112'; // SOL token address
+
+// Function to get current SOL price using Birdeye
 async function getCurrentSolPrice(retries = 3, delay = 1000) {
+  // Get Birdeye API key from env
+  const BIRDEYE_API_KEY = process.env.BIRDEYE_API_KEY;
+  
   for (let i = 0; i < retries; i++) {
     try {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
 
-      const response = await fetch(
-        'https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd,inr',
-        { 
-          signal: controller.signal,
-          headers: {
-            'Accept': 'application/json',
-            'User-Agent': 'Mozilla/5.0' // Some APIs require a user agent
-          }
-        }
-      );
+      // Create headers with API key if available
+      const headers = {
+        'Content-Type': 'application/json'
+      };
+      
+      if (BIRDEYE_API_KEY) {
+        console.log('Using Birdeye API key for price request');
+        headers['X-API-KEY'] = BIRDEYE_API_KEY;
+      }
+      
+      // Get SOL price from Birdeye
+      const url = `${BIRDEYE_API_BASE}/defi/price?address=${SOL_TOKEN_ADDRESS}`;
+      
+      const response = await fetch(url, {
+        method: 'GET',
+        headers,
+        signal: controller.signal
+      });
       
       clearTimeout(timeoutId);
 
       if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+        throw new Error(`Birdeye API error! status: ${response.status}`);
       }
 
       const data = await response.json();
-      if (data && data.solana && data.solana.usd && data.solana.inr) {
+      if (data && data.data && data.data.value) {
+        // For SOL/INR, convert from USD since Birdeye doesn't directly provide INR
+        // Get USD to INR conversion rate - in a production app, you should use a forex API
+        const usdToInrRate = 83.5; // Approximate USD to INR rate (this should ideally be fetched from a forex API)
+        const usdPrice = data.data.value;
+        const inrPrice = usdPrice * usdToInrRate;
+        
+        console.log(`Got SOL price from Birdeye: $${usdPrice} USD (₹${inrPrice} INR)`);
+        
         return {
-          usd: data.solana.usd,
-          inr: data.solana.inr
+          usd: usdPrice,
+          inr: inrPrice
         };
       }
-      throw new Error('Invalid data format from CoinGecko');
+      throw new Error('Invalid data format from Birdeye API');
     } catch (error) {
       console.error(`Attempt ${i + 1} failed:`, error);
       if (i === retries - 1) {
