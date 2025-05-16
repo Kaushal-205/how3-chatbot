@@ -39,18 +39,48 @@ try {
 }
 
 // Function to get current SOL price
-async function getCurrentSolPrice() {
-  try {
-    const response = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd,inr');
-    const data = await response.json();
-    return {
-      usd: data.solana.usd,
-      inr: data.solana.inr
-    };
-  } catch (error) {
-    console.error('Error fetching SOL price:', error);
-    return null;
+async function getCurrentSolPrice(retries = 3, delay = 1000) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
+
+      const response = await fetch(
+        'https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd,inr',
+        { 
+          signal: controller.signal,
+          headers: {
+            'Accept': 'application/json',
+            'User-Agent': 'Mozilla/5.0' // Some APIs require a user agent
+          }
+        }
+      );
+      
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      const data = await response.json();
+      if (data && data.solana && data.solana.usd && data.solana.inr) {
+        return {
+          usd: data.solana.usd,
+          inr: data.solana.inr
+        };
+      }
+      throw new Error('Invalid data format from CoinGecko');
+    } catch (error) {
+      console.error(`Attempt ${i + 1} failed:`, error);
+      if (i === retries - 1) {
+        // On last retry, return null to indicate failure
+        return null;
+      }
+      // Wait before retrying with exponential backoff
+      await new Promise(resolve => setTimeout(resolve, delay * Math.pow(2, i)));
+    }
   }
+  return null; // Return null if all retries fail
 }
 
 // Default prices (if not defined in .env)

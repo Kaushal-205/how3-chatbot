@@ -16,6 +16,56 @@ export function PortfolioMetrics() {
   const [solPrice, setSolPrice] = useState<number>(100) // Default SOL price in USD
   const [error, setError] = useState<string | null>(null)
 
+  // Add this new function before useEffect
+  const fetchSolPrice = async (retries = 3, delay = 1000) => {
+    for (let i = 0; i < retries; i++) {
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
+
+        const response = await fetch(
+          "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd",
+          { signal: controller.signal }
+        );
+        
+        clearTimeout(timeoutId);
+
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        const data = await response.json();
+        if (data && data.solana && data.solana.usd) {
+          // Store the price in localStorage for fallback
+          localStorage.setItem('solPrice', data.solana.usd.toString());
+          localStorage.setItem('solPriceTimestamp', Date.now().toString());
+          return data.solana.usd;
+        }
+        throw new Error('Invalid data format from CoinGecko');
+      } catch (error) {
+        console.error(`Attempt ${i + 1} failed:`, error);
+        if (i === retries - 1) {
+          // On last retry, try to get cached price
+          const cachedPrice = localStorage.getItem('solPrice');
+          const cachedTimestamp = localStorage.getItem('solPriceTimestamp');
+          
+          if (cachedPrice && cachedTimestamp) {
+            const cacheAge = Date.now() - parseInt(cachedTimestamp);
+            // Use cache if it's less than 1 hour old
+            if (cacheAge < 3600000) {
+              console.log('Using cached SOL price');
+              return parseFloat(cachedPrice);
+            }
+          }
+          throw error;
+        }
+        // Wait before retrying
+        await new Promise(resolve => setTimeout(resolve, delay * (i + 1)));
+      }
+    }
+    return 100; // Fallback price
+  };
+
   useEffect(() => {
     const fetchSolanaData = async () => {
       if (!walletAddress || !isAuthenticated) {
@@ -44,7 +94,6 @@ export function PortfolioMetrics() {
             connection = new Connection(endpoint, 'confirmed');
             balance = await connection.getBalance(new PublicKey(walletAddress));
             success = true;
-            // console.log("Connected successfully using:", endpoint);
             break;
           } catch (err) {
             console.warn(`Failed to connect to ${endpoint}:`, err);
@@ -68,13 +117,10 @@ export function PortfolioMetrics() {
           setDailyRewards(0);
         }
         
-        // Fetch SOL price 
+        // Fetch SOL price using the new function
         try {
-          const response = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd");
-          const data = await response.json();
-          if (data && data.solana && data.solana.usd) {
-            setSolPrice(data.solana.usd);
-          }
+          const price = await fetchSolPrice();
+          setSolPrice(price);
         } catch (error) {
           console.error("Error fetching SOL price:", error);
           // Keep the default price

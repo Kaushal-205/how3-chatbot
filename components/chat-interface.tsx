@@ -119,19 +119,57 @@ export default function ChatInterface() {
   const [swapQuoteWidget, setSwapQuoteWidget] = useState<any>(null); // Added for Jupiter
   const [isSwapProcessing, setIsSwapProcessing] = useState<boolean>(false); // Added for Jupiter
 
+  // Token interface matching the expected structure
+  interface TokenInfo {
+    name: string;
+    symbol: string;
+    address: string;
+    decimals: number;
+    logoURI?: string;
+  }
+
   // Helper function to find token by name or symbol
-  const findToken = (tokenName: string) => {
+  const findToken = async (tokenName: string): Promise<TokenInfo | undefined> => {
     const normalizedTokenName = tokenName.toLowerCase();
-    return tokenList.find(token =>
+    
+    // First try the local token list
+    const localToken = tokenList.find(token =>
       token.symbol.toLowerCase() === normalizedTokenName ||
       token.name.toLowerCase().includes(normalizedTokenName)
     );
+    
+    if (localToken) {
+      return localToken as TokenInfo;
+    }
+    
+    // If not found in local list, try the BirdeyeService which uses Jupiter tokens
+    try {
+      const birdeyeService = (await import('@/src/services/BirdeyeService')).default;
+      const token = birdeyeService.getToken(normalizedTokenName);
+      
+      if (token) {
+        // Convert to the format expected by the app
+        const tokenInfo: TokenInfo = {
+          name: String(token.name || ''),
+          symbol: String(token.symbol || ''),
+          address: String(token.address || ''),
+          decimals: Number(token.decimals || 0),
+          logoURI: token.logoURI ? String(token.logoURI) : undefined
+        };
+        return tokenInfo;
+      }
+    } catch (error) {
+      console.error('[findToken] Error looking up token in BirdeyeService:', error);
+    }
+    
+    // Not found in either source
+    return undefined;
   };
 
   // Function to handle passive income prompt
   const handlePassiveIncomePrompt = async (tokenSymbol: string) => {
     // Find token in the token list to get both symbol and mint
-    const token = findToken(tokenSymbol);
+    const token = await findToken(tokenSymbol);
     if (!token || !token.address) {
       setMessages(prev => [...prev, {
         role: "assistant",
@@ -594,7 +632,7 @@ export default function ChatInterface() {
       }]);
 
       // First find the token in our local token list
-      const token = findToken(tokenName);
+      const token = await findToken(tokenName);
       if (!token) {
         setMessages(prev => prev.map(msg =>
           msg.messageId === loadingMsgId
@@ -604,11 +642,25 @@ export default function ChatInterface() {
         return;
       }
 
-      // Get the token price from CoinGecko
-      console.log('Calling API: CoinGecko price API');
-      const tokenPriceResponse = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${token.coingeckoId}&vs_currencies=usd`);
-      const tokenPriceData = await tokenPriceResponse.json();
-      const tokenPrice = tokenPriceData[token.coingeckoId].usd;
+      // Get the token price using BirdeyeService with Jupiter fallback
+      console.log('Calling API: Birdeye price API with Jupiter fallback');
+      const birdeyeService = (await import('@/src/services/BirdeyeService')).default;
+      const priceResult = await birdeyeService.getTokenPrice(token.address);
+      
+      if (!priceResult.success || !priceResult.price) {
+        // If both Birdeye and Jupiter failed, show error
+        console.error('Error fetching token price:', priceResult.error);
+        setMessages(prev => prev.map(msg =>
+          msg.messageId === loadingMsgId
+            ? { ...msg, content: `Sorry, I couldn't fetch the current price for ${tokenName}. Please try again later.` }
+            : msg
+        ));
+        return;
+      }
+      
+      // Use the price from Birdeye or Jupiter
+      console.log(`Got token price from ${priceResult.source}: ${priceResult.price}`);
+      const tokenPrice = priceResult.price;
 
       // Calculate the dollar amount needed for the desired token amount
       const dollarAmount = amount * tokenPrice;
@@ -620,6 +672,17 @@ export default function ChatInterface() {
         tokenAmount: amount,
         tokenAddress: token.address
       });
+      
+      // Check if the purchase amount is too small (less than $0.5)
+      if (dollarAmount < 0.5) {
+        const minTokenAmount = Math.ceil((0.5 / tokenPrice) * 100) / 100; // Round up to 2 decimal places
+        setMessages(prev => prev.map(msg =>
+          msg.messageId === loadingMsgId
+            ? { ...msg, content: `The amount is too small. Please buy at least ${minTokenAmount} ${token.symbol} (minimum $0.50) to proceed.` }
+            : msg
+        ));
+        return;
+      }
       
       // Now create the Stripe checkout session for the token purchase
       const checkoutParams = {
@@ -674,7 +737,7 @@ export default function ChatInterface() {
     }
 
     // Find token in the token list
-    const token = findToken(tokenName);
+    const token = await findToken(tokenName);
     if (!token) {
       setMessages(prev => [...prev, {
         role: "assistant",
@@ -1052,7 +1115,8 @@ export default function ChatInterface() {
 
   // Handle token exploration for buttons
   const handleExploreYield = (tokenSymbol: string) => {
-    const token = findToken(tokenSymbol);
+    // Use the local token list directly for simplicity
+    const token = tokenList.find(t => t.symbol.toUpperCase() === tokenSymbol.toUpperCase());
     if (token) {
       showLendingOptions(token.symbol, token.address);
     }
