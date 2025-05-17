@@ -12,7 +12,7 @@ export function useChatState() {
   const [messages, setMessages] = useState<Message[]>([
     {
       role: "assistant",
-      content: "Hello! I can help you buy SOL, buy other tokens, explore yield options, or check your portfolio. What would you like to do?",
+      content: "Hello! I can help buy SOL or any token on Solana Blockchain, Explore passive income options. What would you like to do?",
       messageId: generateMessageId()
     }
   ]);

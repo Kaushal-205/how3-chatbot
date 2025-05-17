@@ -3,6 +3,7 @@
 import dynamic from "next/dynamic"
 import { PageContainer } from "@/components/page-container"
 import { Loader } from "@/components/ui/loader"
+import { WalletReadyProvider } from "@/components/privy/wallet-ready-provider"
 
 const DynamicChatInterface = dynamic(
   () => import('../components/chat-interface'),
@@ -20,8 +21,10 @@ export function HomeContent() {
   return (
     <PageContainer title="Chat with How3-Chatbot">
       <div className="flex-1 overflow-hidden">
-        <DynamicChatInterface />
+        <WalletReadyProvider>
+          <DynamicChatInterface />
+        </WalletReadyProvider>
       </div>
     </PageContainer>
   )
-} 
+}  

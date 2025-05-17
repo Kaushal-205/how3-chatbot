@@ -9,8 +9,8 @@ import ClientLayout from "./client-layout"
 const inter = Inter({ subsets: ["latin"] })
 
 export const metadata: Metadata = {
-  title: "Trading/Yield Agent",
-  description: "Modern Crypto Investing and Yield Opportunities",
+  title: "How3 Chatbot",
+  description: "Easy Crypto Investing and Yield Opportunities for Retailers",
   generator: 'v0.dev'
 }
 

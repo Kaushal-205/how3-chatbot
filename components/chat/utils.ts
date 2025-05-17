@@ -25,7 +25,7 @@ For each response, return a structured JSON with:
 {
   "intent": "buy_sol" | "buy_token" | "explore_yield" | "view_portfolio" | "out_of_scope",
   "amount": number | null,  // Required for buy_sol and buy_token intents
-  "currency": "SOL",       // Required for buy_sol intent
+  "currency": "SOL",       // Required for buy_solk intent
   "token": string,         // Required for buy_token intent and explore_yield intent
   "message": string        // User-friendly response
 }
